@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+env/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.h5
+*.tflite
+*.onnx
+data/raw/
