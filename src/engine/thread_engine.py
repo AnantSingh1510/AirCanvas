@@ -4,12 +4,11 @@ import pygame
 
 class ThreeDCanvas:
     def __init__(self):
-        self.points = [] # List of (x, y, z, color)
+        self.points = []
         self.rotation_x = 0
         self.rotation_y = 0
 
     def add_point(self, x, y, z, color):
-        # Normalizing coordinates for OpenGL (-1 to 1)
         nx = (x - 0.5) * 2
         ny = (0.5 - y) * 2
         nz = z * 5 # Scale depth
