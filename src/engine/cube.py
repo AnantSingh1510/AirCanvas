@@ -63,22 +63,15 @@ class Cube:
         return verts @ R.T + self.position
 
     def get_face_center(self, face_idx):
-        """World-space center of a face."""
         verts = self.get_transformed_vertices()
         face  = self.faces[face_idx]
         return np.mean(verts[list(face)], axis=0)
 
     def get_face_world_normal(self, face_idx):
-        """Face normal rotated into world space."""
         R = self.get_transform_matrix()
         return R @ self.face_normals[face_idx]
 
     def select_nearest_face(self, finger_world_pos):
-        """
-        Pick the face whose center is closest to the finger tip,
-        but only if the finger is on the correct side (facing the normal).
-        Returns face index or None.
-        """
         best_idx  = None
         best_dist = 0.6
 
@@ -99,10 +92,6 @@ class Cube:
         return best_idx
 
     def extrude_face(self, face_idx, delta):
-        """
-        Push the 4 vertices of face_idx outward by delta units
-        along the face's local normal.
-        """
         normal   = self.face_normals[face_idx]
         for vi in self.faces[face_idx]:
             self.vertex_offsets[vi] += normal * delta
