@@ -12,17 +12,27 @@ GESTURE_COLORS = {
     "POINT":    (50,  220,  80),
     "ROTATE":   (255, 165,   0),
     "GRAB":     (60,  140, 255),
-    "SCALE":    (220,  60, 220),
+    "EXTRUDE":  (60,  200, 255),
+    "SCALE":    (160, 160, 160),
     "DESELECT": (255,  80,  80),
     "IDLE":     (160, 160, 160),
+    "TWO_MOVE":  (60,  200, 255),
+    "TWO_SCALE": (235, 95, 235),
+    "TWO_ROTATE": (255, 185, 70),
+    "TWO_IDLE":  (160, 160, 160),
 }
 GESTURE_ICONS = {
     "POINT":    "index — select face",
     "ROTATE":   "2 fingers — rotate",
-    "GRAB":     "fist — move / extrude",
-    "SCALE":    "thumb+idx — scale",
+    "GRAB":     "fist — move object",
+    "EXTRUDE":  "thumb+pinky — extrude face",
+    "SCALE":    "pinch — add 2nd hand",
     "DESELECT": "3 fingers — deselect",
     "IDLE":     "open palm",
+    "TWO_MOVE":  "2 fists — move object",
+    "TWO_SCALE": "2 index/pinch — scale",
+    "TWO_ROTATE": "2 peace signs — orbit",
+    "TWO_IDLE":  "2 hands visible",
 }
 
 class AirCanvas3D:
@@ -36,9 +46,9 @@ class AirCanvas3D:
         self.mp_hands = mp.solutions.hands.Hands(
             min_detection_confidence=0.75,
             min_tracking_confidence=0.7,
-            max_num_hands=1
+            max_num_hands=2
         )
-        self.engine   = GestureEngine(smooth_frames=5)
+        self.hand_engines = {}
         self.renderer = GLRenderer()
         self.renderer.init_gl(*self.display)
 
@@ -52,16 +62,24 @@ class AirCanvas3D:
         self.prev_smooth_index = None
         self.prev_smooth_wrist = None
         self.prev_pinch        = None
+        self.prev_two_center   = None
+        self.prev_two_distance = None
+        self.prev_two_angle    = None
+        self.prev_two_depth    = None
+        self.prev_two_scale_distance = None
 
         self.extruding        = False
         self.extrude_face_idx = None
+        self.prev_extrude_control = None
 
         self.clock = pygame.time.Clock()
         self.fps   = 0
         self.cam_texture = glGenTextures(1)
+        self.show_camera_background = False
+        self.hand_window_name = "AirCanvas Hand View"
 
-        cv2.namedWindow("AirCanvas — Hand View", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("AirCanvas — Hand View", 480, 360)
+        cv2.namedWindow(self.hand_window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.hand_window_name, 480, 360)
 
     def finger_to_world(self, index_pos):
         x =  (index_pos[0] - 0.5) * 2.5
@@ -81,6 +99,7 @@ class AirCanvas3D:
 
     def draw_camera_background(self):
         glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
         glDisable(GL_LIGHTING)
         glEnable(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, self.cam_texture)
@@ -98,13 +117,15 @@ class AirCanvas3D:
         glMatrixMode(GL_PROJECTION); glPopMatrix()
         glMatrixMode(GL_MODELVIEW);  glPopMatrix()
         glDisable(GL_TEXTURE_2D)
+        glDepthMask(GL_TRUE)
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
 
-    def draw_hud_on_frame(self, frame, gesture, fingers):
+    def draw_hud_on_frame(self, frame, gesture, fingers, hand_labels=None):
         h, w  = frame.shape[:2]
         color = GESTURE_COLORS.get(gesture, (200,200,200))
         icon  = GESTURE_ICONS.get(gesture, "")
+        hand_labels = hand_labels or []
 
         overlay = frame.copy()
         cv2.rectangle(overlay, (0,0), (w,52), (15,15,25), -1)
@@ -116,6 +137,9 @@ class AirCanvas3D:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 1, cv2.LINE_AA)
         cv2.putText(frame, f"{self.fps:.0f} fps", (w-90,33),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160,160,160), 1, cv2.LINE_AA)
+        if hand_labels:
+            cv2.putText(frame, f"hands: {', '.join(hand_labels)}", (12,72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180,180,200), 1, cv2.LINE_AA)
 
         for i, (lbl, state) in enumerate(zip(["T","I","M","R","P"], fingers)):
             cx = 560 + i * 24
@@ -156,6 +180,126 @@ class AirCanvas3D:
             return np.array(curr)
         return self.alpha * np.array(curr) + (1 - self.alpha) * prev
 
+    def reset_single_hand_motion(self):
+        self.smooth_index = None
+        self.smooth_wrist = None
+        self.prev_smooth_index = None
+        self.prev_smooth_wrist = None
+        self.prev_pinch = None
+
+    def reset_two_hand_motion(self):
+        self.prev_two_center = None
+        self.prev_two_distance = None
+        self.prev_two_angle = None
+        self.prev_two_depth = None
+        self.prev_two_scale_distance = None
+
+    def reset_extrude_motion(self):
+        self.extruding = False
+        self.extrude_face_idx = None
+        self.prev_extrude_control = None
+
+    def hand_label(self, handedness, fallback_idx):
+        classifications = getattr(handedness, "classification", [])
+        if classifications:
+            return classifications[0].label
+        return f"Hand {fallback_idx + 1}"
+
+    def angle_delta(self, curr, prev):
+        return (curr - prev + np.pi) % (2 * np.pi) - np.pi
+
+    def extrude_control_value(self, hand_pos, face_idx):
+        normal = self.cube.get_face_world_normal(face_idx)
+        world_pos = self.finger_to_world(hand_pos)
+        screen_axis = normal[:2]
+        axis_len = np.linalg.norm(screen_axis)
+
+        if axis_len > 0.2:
+            return float(np.dot(world_pos[:2], screen_axis / axis_len))
+
+        depth_facing_sign = 1.0 if normal[2] >= 0 else -1.0
+        return float(world_pos[1] * depth_facing_sign)
+
+    def apply_two_hand_gesture(self, hands):
+        hand_a, hand_b = hands[:2]
+        index_a = np.array(hand_a["index_pos"])
+        index_b = np.array(hand_b["index_pos"])
+        center = (index_a + index_b) * 0.5
+        span = index_b - index_a
+        distance = float(np.linalg.norm(span[:2]))
+        angle = float(np.arctan2(span[1], span[0]))
+        depth = float(center[2])
+
+        gestures = {hand_a["gesture"], hand_b["gesture"]}
+        both_grab = gestures == {"GRAB"}
+        both_rotate = gestures == {"ROTATE"}
+        scale_ready = all(h["fingers"][1] for h in (hand_a, hand_b))
+
+        if both_grab:
+            gesture = "TWO_MOVE"
+        elif both_rotate:
+            gesture = "TWO_ROTATE"
+        elif scale_ready:
+            gesture = "TWO_SCALE"
+        else:
+            gesture = "TWO_IDLE"
+
+        if self.prev_two_center is None:
+            self.prev_two_center = center.copy()
+            self.prev_two_distance = distance
+            self.prev_two_angle = angle
+            self.prev_two_depth = depth
+            return gesture
+
+        dc = center - self.prev_two_center
+        da = self.angle_delta(angle, self.prev_two_angle)
+        dz = depth - self.prev_two_depth
+
+        if gesture == "TWO_MOVE":
+            self.extruding = False
+            self.extrude_face_idx = None
+            self.prev_two_scale_distance = None
+            self.prev_extrude_control = None
+            self.cube.position[0] += dc[0] * 4.0
+            self.cube.position[1] += -dc[1] * 4.0
+            self.cube.position[2] += dz * 12.0
+
+        elif gesture == "TWO_SCALE":
+            self.extruding = False
+            self.prev_extrude_control = None
+            if self.prev_two_scale_distance is None:
+                self.prev_two_scale_distance = distance
+            else:
+                smoothed_distance = (
+                    self.prev_two_scale_distance * 0.72 + distance * 0.28
+                )
+                delta = smoothed_distance - self.prev_two_scale_distance
+                if abs(delta) > 0.012:
+                    scale_step = float(np.clip(delta * 1.4, -0.015, 0.015))
+                    self.cube.scale = float(
+                        np.clip(self.cube.scale * (1.0 + scale_step), 0.15, 4.0)
+                    )
+                self.prev_two_scale_distance = smoothed_distance
+
+        elif gesture == "TWO_ROTATE":
+            self.extruding = False
+            self.prev_extrude_control = None
+            self.prev_two_scale_distance = None
+            self.cube.rotation[1] += dc[0] * 300
+            self.cube.rotation[0] += dc[1] * 300
+            self.cube.rotation[2] += np.degrees(da)
+
+        else:
+            self.extruding = False
+            self.prev_extrude_control = None
+            self.prev_two_scale_distance = None
+
+        self.prev_two_center = center.copy()
+        self.prev_two_distance = distance
+        self.prev_two_angle = angle
+        self.prev_two_depth = depth
+        return gesture
+
     def apply_gesture(self, data):
         gesture = data["gesture"]
         self.smooth_index = self.ema(self.smooth_index, data["index_pos"])
@@ -171,42 +315,50 @@ class AirCanvas3D:
         dw = self.smooth_wrist  - self.prev_smooth_wrist
 
         if gesture == "POINT":
-            finger_world = self.finger_to_world(data["index_pos"])
-            self.cube.selected_face = self.cube.select_nearest_face(finger_world)
-            self.extruding = False
+            self.reset_extrude_motion()
+            finger_world = self.finger_to_world(self.smooth_index)
+            selected_face = self.cube.select_face_at_pointer(finger_world[:2])
+            if selected_face is not None:
+                self.cube.selected_face = selected_face
 
         elif gesture == "DESELECT":
             self.cube.selected_face = None
-            self.extruding          = False
-            self.extrude_face_idx   = None
+            self.reset_extrude_motion()
 
         elif gesture == "GRAB":
-            if self.cube.selected_face is not None and not self.extruding:
+            self.reset_extrude_motion()
+            self.cube.position[0] +=  di[0] * 4.0
+            self.cube.position[1] += -di[1] * 4.0
+            self.cube.position[2] +=  di[2] * 12.0
+
+        elif gesture == "EXTRUDE":
+            if self.cube.selected_face is not None:
                 self.extruding        = True
                 self.extrude_face_idx = self.cube.selected_face
-
-            if self.extruding and self.extrude_face_idx is not None:
-                normal   = self.cube.get_face_world_normal(self.extrude_face_idx)
-                movement = np.array([di[0], -di[1], di[2] * 3])
-                delta    = float(np.dot(movement, normal)) * 2.5
-                self.cube.extrude_face(self.extrude_face_idx, delta)
+                control = self.extrude_control_value(
+                    self.smooth_wrist, self.extrude_face_idx
+                )
+                if self.prev_extrude_control is None:
+                    self.prev_extrude_control = control
+                else:
+                    delta = control - self.prev_extrude_control
+                    if abs(delta) > 0.006:
+                        delta = float(np.clip(delta * 0.9, -0.025, 0.025))
+                        self.cube.extrude_face(self.extrude_face_idx, delta)
+                    self.prev_extrude_control = control
             else:
-                self.cube.position[0] +=  di[0] * 4.0
-                self.cube.position[1] += -di[1] * 4.0
-                self.cube.position[2] +=  di[2] * 12.0
+                self.reset_extrude_motion()
 
         elif gesture == "ROTATE":
-            self.extruding = False
+            self.reset_extrude_motion()
             self.cube.rotation[1] += dw[0] * 300
             self.cube.rotation[0] += dw[1] * 300
 
         elif gesture == "SCALE":
-            self.extruding = False
-            dpinch = data["pinch_dist"] - (self.prev_pinch or data["pinch_dist"])
-            self.cube.scale = float(np.clip(self.cube.scale + dpinch * 6, 0.15, 4.0))
+            self.reset_extrude_motion()
 
         else:
-            self.extruding = False
+            self.reset_extrude_motion()
 
         self.prev_smooth_index = self.smooth_index.copy()
         self.prev_smooth_wrist = self.smooth_wrist.copy()
@@ -225,14 +377,12 @@ class AirCanvas3D:
                         self.cube.scale          = 1.0
                         self.cube.vertex_offsets = np.zeros_like(self.cube.base_vertices)
                         self.cube.selected_face  = None
-                        self.smooth_index        = None
-                        self.smooth_wrist        = None
-                        self.extruding           = False
-                        self.extrude_face_idx    = None
+                        self.reset_extrude_motion()
+                        self.reset_single_hand_motion()
+                        self.reset_two_hand_motion()
                     if event.key == pygame.K_c:
                         self.cube.vertex_offsets = np.zeros_like(self.cube.base_vertices)
-                        self.extruding           = False
-                        self.extrude_face_idx    = None
+                        self.reset_extrude_motion()
                     if event.key == pygame.K_q:
                         running = False
 
@@ -248,28 +398,51 @@ class AirCanvas3D:
             fingers = [0,0,0,0,0]
 
             if results.multi_hand_landmarks:
-                lms     = results.multi_hand_landmarks[0]
-                data    = self.engine.get_landmarks(lms)
-                gesture = data["gesture"]
-                fingers = data["fingers"]
-                self.apply_gesture(data)
+                hands = []
+                handedness_list = results.multi_handedness or []
 
-                mp.solutions.drawing_utils.draw_landmarks(
-                    frame, lms, mp.solutions.hands.HAND_CONNECTIONS,
-                    mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
-                    mp.solutions.drawing_styles.get_default_hand_connections_style(),
-                )
+                for idx, lms in enumerate(results.multi_hand_landmarks[:2]):
+                    handedness = handedness_list[idx] if idx < len(handedness_list) else None
+                    label = self.hand_label(handedness, idx)
+                    engine = self.hand_engines.setdefault(label, GestureEngine(smooth_frames=5))
+                    data = engine.get_landmarks(lms, label)
+                    data["label"] = label
+                    hands.append(data)
 
-            frame = self.draw_hud_on_frame(frame, gesture, fingers)
+                    mp.solutions.drawing_utils.draw_landmarks(
+                        frame, lms, mp.solutions.hands.HAND_CONNECTIONS,
+                        mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
+                        mp.solutions.drawing_styles.get_default_hand_connections_style(),
+                    )
 
-            cv2.imshow("AirCanvas Hand View", frame)
+                hands.sort(key=lambda h: h["index_pos"][0])
+                hand_labels = [h["label"] for h in hands]
+                fingers = hands[0]["fingers"]
+
+                if len(hands) >= 2:
+                    self.reset_single_hand_motion()
+                    gesture = self.apply_two_hand_gesture(hands)
+                else:
+                    self.reset_two_hand_motion()
+                    gesture = hands[0]["gesture"]
+                    self.apply_gesture(hands[0])
+            else:
+                self.reset_single_hand_motion()
+                self.reset_two_hand_motion()
+                hand_labels = []
+
+            frame = self.draw_hud_on_frame(frame, gesture, fingers, hand_labels)
+
+            cv2.imshow(self.hand_window_name, frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 running = False
 
-            self.upload_frame_to_texture(frame)
+            if self.show_camera_background:
+                self.upload_frame_to_texture(frame)
 
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            self.draw_camera_background()
+            if self.show_camera_background:
+                self.draw_camera_background()
             self.renderer.draw_scene()
 
             pygame.display.flip()

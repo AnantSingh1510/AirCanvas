@@ -14,6 +14,7 @@ class GLRenderer:
         glLoadIdentity()
         gluPerspective(45, (w / h), 0.1, 50.0)
         glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -28,7 +29,8 @@ class GLRenderer:
         glLightfv(GL_LIGHT0, GL_SPECULAR, [ 0.5,  0.5,  0.5, 1.0])
         glEnable(GL_LIGHT1)
         glLightfv(GL_LIGHT1, GL_POSITION, [-2.0, -2.0, -1.0, 1.0])
-        glLightfv(GL_LIGHT1, GL_DIFFUSE,  [ 0.2,  0.2,  0.2, 1.0])
+        glLightfv(GL_LIGHT1, GL_DIFFUSE,  [ 0.45, 0.45, 0.45, 1.0])
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, [0.35, 0.35, 0.35, 1.0])
         glClearColor(0.05, 0.05, 0.1, 1.0)
 
     FACE_NORMALS = [
@@ -41,9 +43,9 @@ class GLRenderer:
         for i, face in enumerate(faces):
             r, g, b = face_colors[i]
             if i == selected_face:
-                glColor4f(min(r * 1.8, 1.0), min(g * 1.8, 1.0), min(b * 1.8, 1.0), 0.85)
+                glColor4f(min(r * 1.8, 1.0), min(g * 1.8, 1.0), min(b * 1.8, 1.0), 1.0)
             else:
-                glColor4f(r, g, b, 0.45)
+                glColor4f(r, g, b, 0.9)
             glNormal3fv(self.FACE_NORMALS[i])
             glBegin(GL_QUADS)
             for vi in face:
@@ -76,8 +78,8 @@ class GLRenderer:
 
     def draw_cube_edges(self, vertices, edges):
         glDisable(GL_LIGHTING)
-        glLineWidth(1.5)
-        glColor4f(1.0, 1.0, 1.0, 0.7)
+        glLineWidth(2.5)
+        glColor4f(1.0, 1.0, 1.0, 0.95)
         glBegin(GL_LINES)
         for i, j in edges:
             glVertex3fv(vertices[i])
@@ -99,9 +101,10 @@ class GLRenderer:
         glEnable(GL_LIGHTING)
 
     def draw_scene(self):
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glClear(GL_DEPTH_BUFFER_BIT)
+        glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
-        glTranslatef(0.0, 0.0, -3.0)
+        glTranslatef(0.0, 0.0, -4.0)
 
         self.draw_grid()
 

@@ -85,11 +85,66 @@ class Cube:
 
             dist = np.linalg.norm(to_finger)
             if dist < best_dist:
-                best_dist = best_idx = None  # reset
                 best_dist = dist
                 best_idx  = i
 
         return best_idx
+
+    def select_face_at_pointer(self, pointer_xy, margin=0.18):
+        pointer = np.array(pointer_xy, dtype=float)
+        verts = self.get_transformed_vertices()
+        candidates = []
+
+        for i, face in enumerate(self.faces):
+            face_verts = verts[list(face)]
+            poly = face_verts[:, :2]
+            center = np.mean(face_verts, axis=0)
+            normal = self.get_face_world_normal(i)
+            min_edge_dist = min(
+                self._point_segment_distance(pointer, poly[j], poly[(j + 1) % len(poly)])
+                for j in range(len(poly))
+            )
+
+            if self._point_in_polygon(pointer, poly) or min_edge_dist <= margin:
+                facing_score = normal[2]
+                candidates.append((center[2], facing_score, -min_edge_dist, i))
+
+        if candidates:
+            return max(candidates)[3]
+
+        best_idx = None
+        best_dist = margin * 1.75
+        for i, face in enumerate(self.faces):
+            center = np.mean(verts[list(face)], axis=0)
+            dist = np.linalg.norm(pointer - center[:2])
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+        return best_idx
+
+    def _point_in_polygon(self, point, polygon):
+        inside = False
+        x, y = point
+        j = len(polygon) - 1
+        for i in range(len(polygon)):
+            xi, yi = polygon[i]
+            xj, yj = polygon[j]
+            intersects = ((yi > y) != (yj > y)) and (
+                x < (xj - xi) * (y - yi) / ((yj - yi) + 1e-9) + xi
+            )
+            if intersects:
+                inside = not inside
+            j = i
+        return inside
+
+    def _point_segment_distance(self, point, a, b):
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom == 0.0:
+            return float(np.linalg.norm(point - a))
+        t = float(np.clip(np.dot(point - a, ab) / denom, 0.0, 1.0))
+        closest = a + t * ab
+        return float(np.linalg.norm(point - closest))
 
     def extrude_face(self, face_idx, delta):
         normal   = self.face_normals[face_idx]
